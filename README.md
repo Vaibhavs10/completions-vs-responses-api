@@ -15,23 +15,36 @@ App/ Developer owns complete orchestration:
 - In case of tool calls, you run it
 - Send response back as another message (and repeat)
 
+Let's look at an example:
+
 ```python
-import json
 from openai import OpenAI
+from pydantic import BaseModel
+
 client = OpenAI()
 
-chat = client.chat.completions.create(
+class RepoSummary(BaseModel):
+    name: str
+    topics: list[str]
+    risk_level: str
+
+completion = client.chat.completions.create(
     model="gpt-5-mini",
-    response_format={"type": "json_object"},  # JSON mode (valid JSON, not schema-enforced)
     messages=[
-        {"role": "system", "content": "Return a JSON object summarizing the repo."},
-        {"role": "user", "content": "Summarize repo: awesome-embeddings. Fields: name, topics[], risk_level."}
+        {"role": "system", "content": "Extract repo info into the schema."},
+        {"role": "user", "content": "Summarize repo: awesome-embeddings. Fields: name, topics[], risk_level."},
     ],
+    response_format={
+        "type": "json_schema",
+        "json_schema": RepoSummary.model_json_schema()
+    },
 )
-data = json.loads(chat.choices[0].message.content)  # may need to check keys/types yourself
-print(data)
+
+parsed = RepoSummary.model_validate_json(completion.choices[0].message.content)
+print(parsed.model_dump())
 ```
 
+`chat.completions` requires you to manually enforce schema i.e. use `response_format="json_schema"` for strict schema-enforced JSON.
 
 ## Responses API
 
@@ -62,3 +75,5 @@ resp = client.responses.parse(
 summary: RepoSummary = resp.output_parsed
 print(summary.model_dump())
 ```
+
+`responses.parse` automatically maps output → Pydantic model.
