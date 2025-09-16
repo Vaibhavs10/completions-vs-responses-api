@@ -1,18 +1,17 @@
 # pip install openai pydantic
+import json
 from openai import OpenAI
 from pydantic import BaseModel
 client = OpenAI()
 
-# --- App tool (your backend) ---
 def get_weather(city: str) -> dict:
-    # Pretend this hits your weather service
     return {"city": city, "temp_c": 17, "condition": "rain"}
 
-# --- JSON contract for the second turn ---
 class PackAdvice(BaseModel):
     umbrella: bool
     rationale: str
 
+# Tools for Responses = flat shape (no nested "function")
 tools = [{
     "type": "function",
     "name": "get_weather",
@@ -24,37 +23,52 @@ tools = [{
     }
 }]
 
-# --- Turn 1: user asks weather; model may call the tool ---
+# --- Turn 1: user asks; model may call the tool ---
 resp1 = client.responses.create(
-    model="gpt-5-mini",
+    model="gpt-5-mini",  # use a Responses-capable model
     input=[{"role": "user", "content": "What's the weather in Paris today?"}],
     tools=tools,
 )
 
-# Extract tool call (if any), run it
-tool_calls = [o for o in resp1.output if getattr(o, "type", None) == "tool_call"]
-if tool_calls:
-    tc = tool_calls[0].tool_call
-    result = get_weather(**tc.arguments)
+# Extract the first function/tool call (if any)
+func_calls = [o for o in getattr(resp1, "output", []) if getattr(o, "type", None) in ("function_call", "tool_call")]
 
-    # --- Turn 2: follow-up requires STRICT JSON per our schema
-    # NOTE: Using .parse() enforces schema and returns a typed object.
+if not func_calls:
+    # Model answered directly without using the tool
+    print(resp1.output_text)  # convenience accessor for assistant text
+else:
+    fc = func_calls[0]  # has .name, .arguments, .call_id (and sometimes .id)
+    # Arguments can be a dict or a JSON string depending on SDK/model
+    fc_args = getattr(fc, "arguments", {})
+    args = fc_args if isinstance(fc_args, dict) else json.loads(fc_args)
+    weather = get_weather(**args)
+    # Prefer call_id if present; fallback to id
+    tool_call_id = getattr(fc, "call_id", None) or getattr(fc, "id", None)
+
+    # --- Turn 2: require STRICT JSON conforming to PackAdvice ---
+    # Using .parse(...) enforces the schema and returns a typed object
     resp2 = client.responses.parse(
         model="gpt-5-mini",
         input=[
-            # Only stitch in what's relevant, not the entire transcript.
-            {"role": "tool", "name": "get_weather", "tool_call_id": tc.id, "content": str(result)},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "get_weather result (tool_call_id=" + str(tool_call_id) + "): " + json.dumps(weather)
+                    }
+                ]
+            },
             {"role": "user", "content": "Great, should I pack an umbrella? Return JSON only."}
         ],
-        text_format=PackAdvice,   # <- strict schema enforcement
-        # (Under the hood, this uses response_format=json_schema+strict)
+        text_format=PackAdvice,  # schema-enforced structured output
     )
 
     advice: PackAdvice = resp2.output_parsed
-    print(advice.model_dump())   # {'umbrella': True/False, 'rationale': '...'}
-else:
-    print(resp1.output_text)
+    print(advice.model_dump())
 
-# - No ever-growing `messages[]` replay. We pass only the tool result + the new user turn.
-# - .parse() guarantees a schema-valid JSON object (no brittle post-processing).
+
+# Notes:
+# - No ever-growing `messages[]`; we pass just the tool result + the new user turn.
+# - `.parse(..., text_format=PackAdvice)` guarantees the exact schema (no manual JSON parsing/validation).
 # - Easy to scale to more tools, images, or other content parts without reshaping everything as chat messages.

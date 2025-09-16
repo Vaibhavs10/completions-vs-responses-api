@@ -30,7 +30,7 @@ tools = [{
 
 # --- Turn 1: model may request the tool ---
 resp1 = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5-mini",
     messages=messages,
     tools=tools,
     tool_choice="auto",
@@ -40,7 +40,9 @@ messages.append(assistant_msg)
 
 if assistant_msg.tool_calls:
     call = assistant_msg.tool_calls[0]
-    result = get_weather(**call.function.arguments)
+    # `arguments` is a JSON string; parse before unpacking
+    args = json.loads(call.function.arguments)
+    result = get_weather(**args)
 
     # You must append the tool result and replay the entire history:
     messages.append({
@@ -54,7 +56,7 @@ if assistant_msg.tool_calls:
 messages.append({"role": "user", "content": "Great, should I pack an umbrella? Return JSON only."})
 
 resp2 = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5-mini",
     messages=messages,  # ISSUE: must replay all history (grows every turn)
     response_format={"type": "json_object"},  # Guarantees JSON, not schema
 )
