@@ -78,5 +78,24 @@ print(summary.model_dump())
 
 `responses.parse` automatically maps output → Pydantic model.
 
-Let's look at more complex use-case:
+Let's look at more complex use-case!
+
+## Multi‑turn: tool calling + structured output ("Should I pack an umbrella?")
+
+The user first asks for the weather (the model may call a tool), then asks for a strictly‑typed JSON answer about whether to pack an umbrella.
+
+### Chat Completions API
+
+We orchestrate tool calls and replay the full chat history each turn. JSON mode guarantees valid JSON, but we still enforce our own schema and handle retries.
+
+### Responses API
+
+We let the endpoint manage iterative reasoning. We pass only what’s relevant between steps, and `.parse()` enforces our Pydantic schema, returning a typed object.
+
+Key takeaways:
+
+- Orchestration: CC requires you to build and replay the entire `messages[]` every turn; Responses passes only the minimal context (tool result + follow‑up prompt).
+- Schema enforcement: CC JSON mode ensures valid JSON but not your exact schema, so you must validate and handle errors yourself. Responses `.parse()` enforces the Pydantic schema and returns a typed object.
+- Error handling: CC flows often need retry logic for malformed JSON or schema drift. Responses reduces drift via strict schema and internal iteration.
+- Scalability: CC mixes tools and strict output with more prompt guards and state management. Responses scales to longer, multi‑modal chains without an ever‑growing transcript.
 
