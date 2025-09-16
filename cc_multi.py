@@ -1,4 +1,3 @@
-# pip install openai pydantic
 import json
 from openai import OpenAI
 from pydantic import BaseModel, ValidationError

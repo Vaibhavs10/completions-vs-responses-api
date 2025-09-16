@@ -88,9 +88,138 @@ The user first asks for the weather (the model may call a tool), then asks for a
 
 We orchestrate tool calls and replay the full chat history each turn. JSON mode guarantees valid JSON, but we still enforce our own schema and handle retries.
 
+```python
+import json
+from openai import OpenAI
+from pydantic import BaseModel, ValidationError
+client = OpenAI()
+
+# Chat Completions key points:
+# - You must replay the growing chat history each turn.
+# - JSON mode guarantees JSON, but you still validate your schema.
+
+def get_weather(city: str) -> dict:
+    return {"city": city, "temp_c": 17, "condition": "rain"}
+
+class PackAdvice(BaseModel):
+    umbrella: bool
+    rationale: str
+
+messages = [{"role": "user", "content": "What's the weather in Paris today?"}]
+
+tools = [{
+    "type": "function",
+    "function": {
+        "name": "get_weather",
+        "description": "Get current weather by city.",
+        "parameters": {
+            "type": "object",
+            "properties": {"city": {"type": "string"}},
+            "required": ["city"]
+        }
+    }
+}]
+
+# Turn 1: model may call the tool
+resp1 = client.chat.completions.create(model="gpt-5-mini", messages=messages, tools=tools, tool_choice="auto")
+assistant_msg = resp1.choices[0].message
+messages.append(assistant_msg)
+
+if assistant_msg.tool_calls:
+    call = assistant_msg.tool_calls[0]
+    args = json.loads(call.function.arguments)
+    weather = get_weather(**args)
+    messages.append({
+        "role": "tool",
+        "tool_call_id": call.id,
+        "name": "get_weather",
+        "content": json.dumps(weather)
+    })
+
+# Turn 2: ask for JSON and validate it against PackAdvice
+messages.append({"role": "user", "content": "Great, should I pack an umbrella? Return JSON only."})
+resp2 = client.chat.completions.create(
+    model="gpt-5-mini",
+    messages=messages,
+    response_format={"type": "json_object"}
+)
+
+try:
+    data = json.loads(resp2.choices[0].message.content)
+    advice = PackAdvice.model_validate(data)
+    print(advice.model_dump())
+except (json.JSONDecodeError, ValidationError) as e:
+    print("Invalid JSON for PackAdvice:", e)
+```
+
 ### Responses API
 
 We let the endpoint manage iterative reasoning. We pass only what’s relevant between steps, and `.parse()` enforces our Pydantic schema, returning a typed object.
+
+```python
+import json
+from openai import OpenAI
+from pydantic import BaseModel
+client = OpenAI()
+
+# Responses key points:
+# - No chat history replay; send just what's needed.
+# - parse(..., text_format=...) enforces your schema.
+
+def get_weather(city: str) -> dict:
+    return {"city": city, "temp_c": 17, "condition": "rain"}
+
+class PackAdvice(BaseModel):
+    umbrella: bool
+    rationale: str
+
+tools = [{
+    "type": "function",
+    "name": "get_weather",
+    "description": "Get current weather by city.",
+    "parameters": {
+        "type": "object",
+        "properties": {"city": {"type": "string"}},
+        "required": ["city"]
+    }
+}]
+
+# Turn 1: maybe a tool call
+resp1 = client.responses.create(
+    model="gpt-5-mini",
+    input=[{"role": "user", "content": "What's the weather in Paris today?"}],
+    tools=tools,
+)
+
+func_calls = [o for o in getattr(resp1, "output", []) if getattr(o, "type", None) in ("function_call", "tool_call")]
+if not func_calls:
+    print(resp1.output_text)
+else:
+    fc = func_calls[0]
+    fc_args = getattr(fc, "arguments", {})
+    args = fc_args if isinstance(fc_args, dict) else json.loads(fc_args)
+    weather = get_weather(**args)
+    tool_call_id = getattr(fc, "call_id", None) or getattr(fc, "id", None)
+
+    # Turn 2: strict schema output
+    resp2 = client.responses.parse(
+        model="gpt-5-mini",
+        input=[
+            {
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": "get_weather result (tool_call_id=" + str(tool_call_id) + "): " + json.dumps(weather)
+                }]
+            },
+            {"role": "user", "content": "Great, should I pack an umbrella? Return JSON only."}
+        ],
+        text_format=PackAdvice,
+    )
+
+    advice: PackAdvice = resp2.output_parsed
+    print(advice.model_dump())
+```
 
 Key takeaways:
 
