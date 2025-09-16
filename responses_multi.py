@@ -26,7 +26,7 @@ tools = [{
 
 # --- Turn 1: user asks weather; model may call the tool ---
 resp1 = client.responses.create(
-    model="gpt-4o-mini",
+    model="gpt-5-mini",
     input=[{"role": "user", "content": "What's the weather in Paris today?"}],
     tools=tools,
 )
@@ -40,7 +40,7 @@ if tool_calls:
     # --- Turn 2: follow-up requires STRICT JSON per our schema
     # NOTE: Using .parse() enforces schema and returns a typed object.
     resp2 = client.responses.parse(
-        model="gpt-4o-2024-08-06",
+        model="gpt-5-mini",
         input=[
             # Only stitch in what's relevant, not the entire transcript.
             {"role": "tool", "name": "get_weather", "tool_call_id": tc.id, "content": str(result)},
