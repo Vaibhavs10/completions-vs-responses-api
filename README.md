@@ -77,3 +77,6 @@ print(summary.model_dump())
 ```
 
 `responses.parse` automatically maps output → Pydantic model.
+
+Let's look at more complex use-case:
+
