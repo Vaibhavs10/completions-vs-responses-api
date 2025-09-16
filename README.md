@@ -3,24 +3,51 @@
 A brief write-up about Chat Completions vs Responses API.
 
 TL;DR
-- Responses - use it for new projects especially when interfacing with agents, tool calling, structure outputs, multi-modal prompts and any multi-step workflow.
-- Chat Completions - use it for simple, stateless chat or for existing integrations.
+- Responses: use for agentic or multi‑step flows, tool calling, multi‑modal input, and strictly typed outputs when you want the API to manage iteration.
+- Chat Completions: use for simple, stateless chat, short prompts, or existing CC integrations where you prefer manual orchestration.
 
-Let's look at an example:
+### Quick chooser
+
+| Scenario |
+| --- |
+| Stateless chat, short prompts, existing CC integration → Chat Completions |
+| Tool calls across multiple steps, internal iteration → Responses |
+| Strictly typed outputs (schema‑enforced) → Responses |
+| You want fine‑grained manual control over retries/state → Chat Completions |
+| Multi‑modal input or longer chains that may iterate → Responses |
+
+### Minimal side‑by‑side
+
+```python
+# Chat Completions (manual orchestration + JSON mode)
+resp = client.chat.completions.create(
+    model="gpt-5-mini",
+    messages=messages,
+    response_format={"type": "json_object"}
+)
+data = json.loads(resp.choices[0].message.content)
+item = Item.model_validate(data)
+
+# Responses (no history replay + schema‑enforced parse)
+resp = client.responses.parse(
+    model="gpt-5-mini",
+    input=[{"role": "user", "content": "..."}],
+    text_format=Item,
+)
+item: Item = resp.output_parsed
+```
+
+
 
 ## Chat Completions API
 
-App/ Developer owns complete orchestration:
-- Build `messages[]` and send to `/chat/completions`
-- In case of tool calls, you run it
-- Send response back as another message (and repeat)
+Build `messages[]`, call `/chat/completions`, run tools yourself, and validate strict JSON against your schema.
 
-Let's look at an example:
+
 
 ```python
 from openai import OpenAI
 from pydantic import BaseModel
-
 client = OpenAI()
 
 class RepoSummary(BaseModel):
@@ -48,11 +75,7 @@ print(parsed.model_dump())
 
 ## Responses API
 
-Provides a single endpoint that:
-- Can call tools and iterate internally
-- Accepts multi-modal input
-- Supports structured outputs (validated JSON schema or function outputs)
-- Scales with longer chains
+Single endpoint that can call tools, accept multi‑modal input, enforce structured outputs, and iterate internally across longer chains.
 
 ```python
 from openai import OpenAI
@@ -66,19 +89,15 @@ class RepoSummary(BaseModel):
 
 resp = client.responses.parse(
     model="gpt-5-mini",
-    input=[
-        {"role": "system", "content": "Extract repo info into the schema."},
-        {"role": "user", "content": "Summarize repo: awesome-embeddings. Fields: name, topics[], risk_level."}
-    ],
-    text_format=RepoSummary,  # SDK automatically enforces the schema
+    input=[{"role": "user", "content": "Summarize repo: awesome-embeddings."}],
+    text_format=RepoSummary,
 )
-summary: RepoSummary = resp.output_parsed
-print(summary.model_dump())
+print(resp.output_parsed.model_dump())
 ```
 
 `responses.parse` automatically maps output → Pydantic model.
 
-Let's look at more complex use-case!
+A more complex use case
 
 ## Multi‑turn: tool calling + structured output ("Should I pack an umbrella?")
 
@@ -228,3 +247,57 @@ Key takeaways:
 - Error handling: CC flows often need retry logic for malformed JSON or schema drift. Responses reduces drift via strict schema and internal iteration.
 - Scalability: CC mixes tools and strict output with more prompt guards and state management. Responses scales to longer, multi‑modal chains without an ever‑growing transcript.
 
+## Migration: Chat Completions → Responses
+
+- Replace `client.chat.completions.create(...)` with `client.responses.create(...)` for general calls, or `client.responses.parse(..., text_format=YourModel)` when you need typed outputs.
+- Stop replaying the entire `messages[]` every turn; pass only what’s needed (e.g., tool result + next instruction).
+- Replace JSON mode + manual validation with Pydantic via `text_format`.
+
+```python
+# Before (Chat Completions)
+import json
+resp = client.chat.completions.create(
+    model="gpt-5-mini",
+    messages=messages,
+    response_format={"type": "json_object"}
+)
+data = json.loads(resp.choices[0].message.content)
+obj = MyModel.model_validate(data)
+
+# After (Responses)
+resp = client.responses.parse(
+    model="gpt-5-mini",
+    input=[{"role": "user", "content": "..."}],  # No history replay
+    text_format=MyModel,
+)
+obj: MyModel = resp.output_parsed
+```
+
+## Streaming (TODO: how does it differ from CC)
+
+Short example of streaming with Responses:
+
+```python
+from openai import OpenAI
+client = OpenAI()
+
+with client.responses.stream(
+    model="gpt-5-mini",
+    input=[{"role": "user", "content": "Explain vector databases in 3 points."}],
+) as stream:
+    for event in stream:
+        if getattr(event, "type", None) == "response.output_text.delta":
+            print(event.delta, end="")
+```
+
+## Pitfalls and anti‑patterns
+
+- Chat Completions JSON mode ensures JSON, not your schema. Always validate.
+- Responses doesn’t need full history; send minimal context between steps.
+- Keep tool outputs structured; avoid mixing tool text into user content.
+- Log `tool_call_id` when correlating tool calls across steps.
+
+## Cost and latency
+
+- Responses may increase per‑request latency on multi‑step chains but reduces overall orchestration complexity and retry loops.
+- Chat Completions can be faster for single‑step prompts where you already control retries and strictness.
