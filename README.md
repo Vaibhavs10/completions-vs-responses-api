@@ -3,18 +3,19 @@
 A brief write-up about Chat Completions vs Responses API.
 
 TL;DR
-- Responses: use for agentic or multi‑step flows, tool calling, multi‑modal input, and strictly typed outputs when you want the API to manage iteration.
-- Chat Completions: use for simple, stateless chat, short prompts, or existing CC integrations where you prefer manual orchestration.
+- Responses: recommended for new projects, agentic by default, multi‑step flows with optional server‑managed state across turns and evented streaming.
+- Chat Completions: ideal for simple, stateless prompts and existing CC integrations; you manage conversation state and validate schemas yourself.
 
 ### Quick chooser
 
-| Scenario |
-| --- |
-| Stateless chat, short prompts, existing CC integration → Chat Completions |
-| Tool calls across multiple steps, internal iteration → Responses |
-| Strictly typed outputs (schema‑enforced) → Responses |
-| You want fine‑grained manual control over retries/state → Chat Completions |
-| Multi‑modal input or longer chains that may iterate → Responses |
+| Scenario | Prefer |
+| --- | --- |
+| Stateless, single‑turn chat or existing CC integration | Chat Completions |
+| Multi‑turn with state preserved server‑side | Responses |
+| Agent‑like multi‑step orchestration | Responses |
+| Connect the model to tools hosted on remote MCP servers | Responses |
+| Fine‑grained manual control over history/retries | Chat Completions |
+| Longer chains with internal iteration | Responses |
 
 ### Minimal side‑by‑side
 
@@ -41,7 +42,7 @@ item: Item = resp.output_parsed
 
 ## Chat Completions API
 
-Build `messages[]`, call `/chat/completions`, run tools yourself, and validate strict JSON against your schema.
+Build and replay `messages[]` every turn, call `/chat/completions`, and validate strict JSON against your schema using `response_format` plus your own parsing.
 
 
 
@@ -75,7 +76,7 @@ print(parsed.model_dump())
 
 ## Responses API
 
-Single endpoint that can call tools, accept multi‑modal input, enforce structured outputs, and iterate internally across longer chains.
+Single endpoint with optional server‑side statefulness and an SDK parse helper for typed outputs. `.parse(..., text_format=...)` returns a typed object (`output_parsed`).
 
 ```python
 from openai import OpenAI
@@ -240,18 +241,23 @@ else:
     print(advice.model_dump())
 ```
 
-Key takeaways:
+Key takeaways
 
-- Orchestration: CC requires you to build and replay the entire `messages[]` every turn; Responses passes only the minimal context (tool result + follow‑up prompt).
-- Schema enforcement: CC JSON mode ensures valid JSON but not your exact schema, so you must validate and handle errors yourself. Responses `.parse()` enforces the Pydantic schema and returns a typed object.
-- Error handling: CC flows often need retry logic for malformed JSON or schema drift. Responses reduces drift via strict schema and internal iteration.
-- Scalability: CC mixes tools and strict output with more prompt guards and state management. Responses scales to longer, multi‑modal chains without an ever‑growing transcript.
+- Orchestration: CC requires replaying the entire `messages[]` each turn; Responses can keep state on the server and lets you pass only what’s needed.
+- Schema handling: Both support schema‑constrained outputs; CC uses JSON schema modes with manual validation; Responses adds an SDK parse helper that returns typed objects.
+- MCP: Responses supports remote MCP servers.
+- Streaming: CC streams token deltas appended to `message.content`. Responses emits semantic events (e.g. `response.output_text.delta`).
+- Storage: Responses are stored by default; Chat Completions are stored not by default. Set `store=False` to disable.
+- Error handling: CC flows often need retry logic for malformed JSON or schema drift. Responses 
+reduces drift via strict schema and internal iteration.
+- Scalability: CC mixes tools and strict output with more prompt guards and state management. 
+Responses scales to longer, multi‑modal chains without an ever‑growing transcript.
 
 ## Migration: Chat Completions → Responses
 
-- Replace `client.chat.completions.create(...)` with `client.responses.create(...)` for general calls, or `client.responses.parse(..., text_format=YourModel)` when you need typed outputs.
-- Stop replaying the entire `messages[]` every turn; pass only what’s needed (e.g., tool result + next instruction).
-- Replace JSON mode + manual validation with Pydantic via `text_format`.
+- General calls: replace `client.chat.completions.create(...)` with `client.responses.create(...)`.
+- Typed outputs: replace JSON mode + manual validation with `client.responses.parse(..., text_format=YourModel)`.
+- State: stop replaying the entire `messages[]`; either pass minimal context between turns or use `store=True` and `previous_response_id`.
 
 ```python
 # Before (Chat Completions)
@@ -273,7 +279,25 @@ resp = client.responses.parse(
 obj: MyModel = resp.output_parsed
 ```
 
-## Streaming (TODO: how does it differ from CC)
+## Streaming
+
+Chat Completions streams token deltas appended to message content, you concatenate these deltas yourself to render text. Responses streams typed, semantic events (for example, `response.output_text.delta`), so you can subscribe directly to text updates, handle clear boundaries between items, and avoid manual diffing of message state.
+
+Chat Completions (token deltas appended to content)
+
+```python
+from openai import OpenAI
+client = OpenAI()
+
+stream = client.chat.completions.create(
+    model="gpt-5-mini",
+    messages=[{"role": "user", "content": "Explain vector databases in 3 points."}],
+    stream=True,
+)
+for chunk in stream:
+    delta = getattr(chunk.choices[0].delta, "content", None) or ""
+    print(delta, end="")
+```
 
 Short example of streaming with Responses:
 
@@ -293,11 +317,10 @@ with client.responses.stream(
 ## Pitfalls and anti‑patterns
 
 - Chat Completions JSON mode ensures JSON, not your schema. Always validate.
-- Responses doesn’t need full history; send minimal context between steps.
-- Keep tool outputs structured; avoid mixing tool text into user content.
-- Log `tool_call_id` when correlating tool calls across steps.
+- In Responses, avoid replaying full history; pass minimal context or use `previous_response_id`.
+- Prefer `.parse(...)` for strict typing instead of parsing strings manually.
 
 ## Cost and latency
 
-- Responses may increase per‑request latency on multi‑step chains but reduces overall orchestration complexity and retry loops.
+- Responses can reduce orchestration complexity and retries on multi‑step chains
 - Chat Completions can be faster for single‑step prompts where you already control retries and strictness.
