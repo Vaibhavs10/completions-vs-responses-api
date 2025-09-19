@@ -4,7 +4,7 @@ A brief write-up about Chat Completions vs Responses API.
 
 TL;DR
 - Responses: recommended for new projects, agentic by default, multi‑step flows with optional server‑managed state across turns and evented streaming.
-- Chat Completions: ideal for simple, stateless prompts and existing CC integrations; you manage conversation state and validate schemas yourself.
+- Chat Completions: ideal for simple, stateless prompts and existing CC integrations; you manage conversation state and validate schemas yourself. # Note: "and validate schemas yourself." => not really true
 
 ### Quick chooser
 
@@ -13,36 +13,35 @@ TL;DR
 | Stateless, single‑turn chat or existing CC integration | Chat Completions |
 | Multi‑turn with state preserved server‑side | Responses |
 | Agent‑like multi‑step orchestration | Responses |
-| Connect the model to tools hosted on remote MCP servers | Responses |
+| Remote tool execution (MCP server, web search, file search, etc.) | Responses |
 | Fine‑grained manual control over history/retries | Chat Completions |
 | Longer chains with internal iteration | Responses |
 
 ### Minimal side‑by‑side
 
+**NOTE:** not sure example is relevant anymore since almost the same
+
 ```python
-# Chat Completions (manual orchestration + JSON mode)
+# Chat Completions
 resp = client.chat.completions.create(
     model="gpt-5-mini",
     messages=messages,
-    response_format={"type": "json_object"}
+    response_format=Item
 )
-data = json.loads(resp.choices[0].message.content)
-item = Item.model_validate(data)
+item = resp.choices[0].message.parsed
 
-# Responses (no history replay + schema‑enforced parse)
+# Responses
 resp = client.responses.parse(
     model="gpt-5-mini",
-    input=[{"role": "user", "content": "..."}],
+    input=messages,
     text_format=Item,
 )
 item: Item = resp.output_parsed
 ```
 
-
-
 ## Chat Completions API
 
-Build and replay `messages[]` every turn, call `/chat/completions`, and validate strict JSON against your schema using `response_format` plus your own parsing.
+Build and replay `messages[]` every turn, call `/chat/completions`, and validate strict JSON against your schema using `response_format` plus your own parsing. # **TODO:** adapt comment?
 
 
 
@@ -62,17 +61,11 @@ completion = client.chat.completions.create(
         {"role": "system", "content": "Extract repo info into the schema."},
         {"role": "user", "content": "Summarize repo: awesome-embeddings. Fields: name, topics[], risk_level."},
     ],
-    response_format={
-        "type": "json_schema",
-        "json_schema": RepoSummary.model_json_schema()
-    },
+    response_format=RepoSummary,
 )
 
-parsed = RepoSummary.model_validate_json(completion.choices[0].message.content)
-print(parsed.model_dump())
+print(completion.choices[0].message.parsed)
 ```
-
-`chat.completions` requires you to manually enforce schema i.e. use `response_format="json_schema"` for strict schema-enforced JSON.
 
 ## Responses API
 
@@ -96,10 +89,6 @@ resp = client.responses.parse(
 print(resp.output_parsed.model_dump())
 ```
 
-`responses.parse` automatically maps output → Pydantic model.
-
-A more complex use case
-
 ## Multi‑turn: tool calling + structured output ("Should I pack an umbrella?")
 
 The user first asks for the weather (the model may call a tool), then asks for a strictly‑typed JSON answer about whether to pack an umbrella.
@@ -116,7 +105,7 @@ client = OpenAI()
 
 # Chat Completions key points:
 # - You must replay the growing chat history each turn.
-# - JSON mode guarantees JSON, but you still validate your schema.
+# - JSON mode guarantees JSON, but you still validate your schema. # TODO
 
 def get_weather(city: str) -> dict:
     return {"city": city, "temp_c": 17, "condition": "rain"}
@@ -176,6 +165,9 @@ except (json.JSONDecodeError, ValidationError) as e:
 
 We let the endpoint manage iterative reasoning. We pass only what’s relevant between steps, and `.parse()` enforces our Pydantic schema, returning a typed object.
 
+**TODO:** this snippet feels extremely complicated for something that is supposed to be "easier".
+          check https://platform.openai.com/docs/guides/conversation-state?api-mode=responses#passing-context-from-the-previous-response
+
 ```python
 import json
 from openai import OpenAI
@@ -204,60 +196,42 @@ tools = [{
     }
 }]
 
-# Turn 1: maybe a tool call
+# Turn 1: tool call
 resp1 = client.responses.create(
     model="gpt-5-mini",
-    input=[{"role": "user", "content": "What's the weather in Paris today?"}],
+    input={"role": "user", "content": "What's the weather in Paris today?"},
     tools=tools,
 )
 
-func_calls = [o for o in getattr(resp1, "output", []) if getattr(o, "type", None) in ("function_call", "tool_call")]
-if not func_calls:
-    print(resp1.output_text)
-else:
-    fc = func_calls[0]
-    fc_args = getattr(fc, "arguments", {})
-    args = fc_args if isinstance(fc_args, dict) else json.loads(fc_args)
-    weather = get_weather(**args)
-    tool_call_id = getattr(fc, "call_id", None) or getattr(fc, "id", None)
+# Turn 2: should I take my umbrella?
+resp2 = client.responses.create(
+    model="gpt-5-mini",
+    input={"role": "user", "content": "Great, should I pack an umbrella?"},
+    text_format=PackAdvice,
+    previous_response_id=resp1.id,
+)
 
-    # Turn 2: strict schema output
-    resp2 = client.responses.parse(
-        model="gpt-5-mini",
-        input=[
-            {
-                "role": "assistant",
-                "content": [{
-                    "type": "output_text",
-                    "text": "get_weather result (tool_call_id=" + str(tool_call_id) + "): " + json.dumps(weather)
-                }]
-            },
-            {"role": "user", "content": "Great, should I pack an umbrella? Return JSON only."}
-        ],
-        text_format=PackAdvice,
-    )
-
-    advice: PackAdvice = resp2.output_parsed
-    print(advice.model_dump())
+advice: PackAdvice = resp2.output_parsed
+print(advice)
 ```
 
 Key takeaways
 
-- Orchestration: CC requires replaying the entire `messages[]` each turn; Responses can keep state on the server and lets you pass only what’s needed.
-- Schema handling: Both support schema‑constrained outputs; CC uses JSON schema modes with manual validation; Responses adds an SDK parse helper that returns typed objects.
-- MCP: Responses supports remote MCP servers.
+- Orchestration: CC requires replaying the entire `messages[]` each turn; Responses can keep state on the server and lets you pass only what’s needed. # only when using `previous_response_id` (or conversation) but not by default
+- Schema handling: Both support schema‑constrained outputs; CC uses JSON schema modes with manual validation; Responses adds an SDK parse helper that returns typed objects. # TODO: update
+- MCP: Responses supports remote MCP servers. # TODO: maybe an MCP example with ResponsesAPI ? remote execution is the key feature in favor of Responses API IMO
 - Streaming: CC streams token deltas appended to `message.content`. Responses emits semantic events (e.g. `response.output_text.delta`).
-- Storage: Responses are stored by default; Chat Completions are stored not by default. Set `store=False` to disable.
+- Storage: Responses are stored by default; Chat Completions are not stored by default. Set `store=False` to disable.
 - Error handling: CC flows often need retry logic for malformed JSON or schema drift. Responses 
-reduces drift via strict schema and internal iteration.
+reduces drift via strict schema and internal iteration. # is this really correct?
 - Scalability: CC mixes tools and strict output with more prompt guards and state management. 
-Responses scales to longer, multi‑modal chains without an ever‑growing transcript.
+Responses scales to longer, multi‑modal chains without an ever‑growing transcript. # **NOTE:** not sure I understand this point
 
 ## Migration: Chat Completions → Responses
 
 - General calls: replace `client.chat.completions.create(...)` with `client.responses.create(...)`.
 - Typed outputs: replace JSON mode + manual validation with `client.responses.parse(..., text_format=YourModel)`.
-- State: stop replaying the entire `messages[]`; either pass minimal context between turns or use `store=True` and `previous_response_id`.
+- State: stop replaying the entire `messages[]`; simply pass `previous_response_id` to continue a conversation.
 
 ```python
 # Before (Chat Completions)
@@ -274,6 +248,7 @@ obj = MyModel.model_validate(data)
 resp = client.responses.parse(
     model="gpt-5-mini",
     input=[{"role": "user", "content": "..."}],  # No history replay
+    # TODO: requires previous_message_id
     text_format=MyModel,
 )
 obj: MyModel = resp.output_parsed
@@ -310,17 +285,21 @@ with client.responses.stream(
     input=[{"role": "user", "content": "Explain vector databases in 3 points."}],
 ) as stream:
     for event in stream:
-        if getattr(event, "type", None) == "response.output_text.delta":
-            print(event.delta, end="")
+        if event.type == "response.output_text.done": # NOTE: I think events in a stream always have a `.type` which simplifies the logic
+            print(event.text) # **NOTE:** the advantage of ResponsesAPI is precisely that you don't need to listen to deltas one by one
 ```
 
 ## Pitfalls and anti‑patterns
 
-- Chat Completions JSON mode ensures JSON, not your schema. Always validate.
+**NOTE:** this section feels redundant with what's above
+
+- Chat Completions JSON mode ensures JSON, not your schema. Always validate. # **TODO:** really not sure about that. You can ask for "json_object" (returns a JSON) or "json_schema" (return a JSON following schema)
 - In Responses, avoid replaying full history; pass minimal context or use `previous_response_id`.
 - Prefer `.parse(...)` for strict typing instead of parsing strings manually.
 
 ## Cost and latency
+
+**NOTE:** this section feels a bit artificial
 
 - Responses can reduce orchestration complexity and retries on multi‑step chains
 - Chat Completions can be faster for single‑step prompts where you already control retries and strictness.
